@@ -1,1 +1,7 @@
 eval_task_venv
+.clangd
+.clang-format
+.zed
+.vs
+.vscode
+a.out

@@ -2,20 +2,27 @@
 #include <algorithm>
 #include <armadillo>
 #include <cassert>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <numeric>
+#include <ostream>
 #include <ranges>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+using DistanceAndWeight = std::pair<double, std::reference_wrapper<double>>;
+
 std::tuple<std::unique_ptr<arma::dmat>, std::unique_ptr<arma::dmat>,
-           std::vector<double>, std::vector<double>, std::vector<double>>
+           std::vector<double>, std::vector<double>, std::vector<int>>
 prepare()
 {
     rapidcsv::Document f{"./datasets/combined.csv"};
@@ -24,7 +31,7 @@ prepare()
     auto y = f.GetColumn<double>("y");
     auto w = f.GetColumn<double>("weight");
     std::vector<double> negative_w{};
-    std::vector<double> negative_indices{};
+    std::vector<int> negative_indices{};
 
     for (auto [index, weight] : std::ranges::views::enumerate(w))
     {
@@ -47,7 +54,7 @@ prepare()
         (*pt_y)[0, i] = std::get<0>(k);
         (*pt_y)[1, i] = std::get<1>(k);
 
-        if (w[i] < 0)
+        if (w.at(i) < 0)
         {
             (*negative_pt_y)[0, j] = std::get<0>(k);
             (*negative_pt_y)[1, j] = std::get<1>(k);
@@ -61,129 +68,84 @@ prepare()
             negative_indices};
 }
 
-std::vector<std::pair<std::vector<double>, std::vector<double>>>
-compute_distance(const std::unique_ptr<arma::dmat>& all,
-                 const std::unique_ptr<arma::dmat>& neg,
-                 const std::vector<double>& weights)
+std::vector<std::vector<DistanceAndWeight>> compute_distance(
+    const std::unique_ptr<arma::dmat>& all,
+    const std::unique_ptr<arma::dmat>& neg, std::vector<double>& weights)
 {
 
-    std::vector<std::pair<std::vector<double>, std::vector<double>>> dnw{};
+    std::vector<std::vector<DistanceAndWeight>> dnw{};
     arma::dvec scale{1, 10};
 
     for (int i = 0; i < neg->n_cols; i++)
     {
-        auto weight{weights};
         auto disp_vector =
             std::make_unique<arma::mat>(all->each_col() - neg->col(i));
 
         disp_vector->each_col() %= scale;
 
         auto norm = arma::dcolvec{arma::vecnorm((*disp_vector)).as_col()};
-        auto v = std::vector{norm.begin(), norm.end()};
-        auto w = std::vector<double>{};
-        w.reserve(v.size());
+        auto v = std::vector<DistanceAndWeight>{};
 
-        std::for_each(v.begin(), v.end(), [&w](double* i) { w.push_back(*i); });
+        for (std::tuple<double, double&> i : std::views::zip(norm, weights))
+        {
+            v.push_back(DistanceAndWeight{std::get<0>(i), std::get<1>(i)});
+        }
 
-        auto distances_and_weights = std::ranges::views::zip(w, weight);
+        std::sort(
+            v.begin(), v.end(),
+            [](const DistanceAndWeight& lhs, const DistanceAndWeight& rhs) {
+                return lhs.first < rhs.first;
+            });
 
-        std::ranges::sort(distances_and_weights.begin(),
-                          distances_and_weights.end(), std::less<>(),
-                          [](const auto& i) { return std::get<0>(i); });
-
-        dnw.push_back({w, weight});
+        dnw.push_back(v);
     }
 
     return dnw;
 }
 
-class Cell
+void resample(int index, double weight,
+              std::vector<DistanceAndWeight>& distances_and_weights)
 {
-  public:
-    Cell(double weight, double pt, double y)
-        : m_weight{weight}, m_pt{pt}, m_y{y}, m_initial_weight{weight}
+    std::vector<double> added_weights{};
+    std::vector<double> indices{};
+    double abs_weight_sum{};
+
+    int i = 0;
+    while (weight < 0)
     {
-    }
-
-    double weight()
-    {
-        return m_weight;
-    }
-
-    double initial_weight()
-    {
-        return m_initial_weight;
-    }
-
-    double pt()
-    {
-        return m_pt;
-    }
-
-    double y()
-    {
-        return m_y;
-    }
-
-    void resample(const std::vector<double>& distances,
-                  const std::vector<double>& weights)
-    {
-        std::vector<double> added_weights{};
-        added_weights.push_back(m_initial_weight);
-
-        std::vector<double> pos_weights{};
-        pos_weights.reserve(added_weights.size());
-
-        int i = 0;
-        while (m_weight < 0)
+        if (distances_and_weights.at(i).first == 0)
         {
-            if (distances[i] == 0)
-            {
-                i += 1;
-                continue;
-            }
-
-            m_weight += weights[i];
-            added_weights.push_back(weights[i]);
+            indices.push_back(i);
+            added_weights.push_back(weight);
+            abs_weight_sum += std::abs(weight);
             i += 1;
+            continue;
         }
 
-        std::transform(added_weights.begin(), added_weights.end(),
-                       pos_weights.begin(),
-                       [](double i) { return std::abs(i); });
-
-        m_weight =
-            m_weight / std::reduce(pos_weights.begin(), pos_weights.end(), 0);
-
-        m_weight = std::abs(m_initial_weight) *
-                   std::reduce(added_weights.begin(), added_weights.end(), 0);
+        weight += distances_and_weights.at(i).second;
+        added_weights.push_back(distances_and_weights.at(i).second);
+        i += 1;
     }
 
-  private:
-    double m_weight{};
-    double m_initial_weight{};
-    double m_pt;
-    double m_y;
-};
+    std::for_each(indices.begin(), indices.end(),
+                  [&weight, &distances_and_weights, &added_weights,
+                   &abs_weight_sum](auto i) mutable {
+                      distances_and_weights.at(i).second.get() =
+                          std::abs(distances_and_weights.at(i).second.get()) /
+                          abs_weight_sum * weight;
+                  });
+}
 
-std::vector<double> resample_all(
-    const std::vector<std::pair<std::vector<double>, std::vector<double>>>&
-        distances_and_weights,
+void resample_all(
+    std::vector<std::vector<DistanceAndWeight>>& distances_and_weights,
     const std::vector<double>& negative_weights,
-    const arma::Mat<double>& negative_pt_y)
+    const std::vector<int>& indices)
 {
-    std::vector<double> pos_weights{};
-
     for (int i = 0; i < negative_weights.size(); i++)
     {
-        Cell c{negative_weights[i], negative_pt_y[0, i], negative_pt_y[1, i]};
-        c.resample(distances_and_weights[i].first,
-                   distances_and_weights[i].second);
-
-        pos_weights.push_back(c.weight());
+        resample(indices.at(i), negative_weights.at(i),
+                 distances_and_weights.at(i));
     }
-
-    return pos_weights;
 }
 
 int main()
@@ -196,20 +158,8 @@ int main()
     auto neg_indices{std::get<4>(tuple)};
 
     auto distances_and_weights = compute_distance(pt_y, negative_pt_y, weights);
-    std::vector<Cell> cells{};
-    cells.reserve(negative_pt_y->size());
 
-    Cell c{neg_weights[0], (*negative_pt_y)[0, 0], (*negative_pt_y)[1, 0]};
-    c.resample(distances_and_weights[0].first, distances_and_weights[0].second);
-
-    auto pos_weights =
-        resample_all(distances_and_weights, neg_weights, (*negative_pt_y));
-
-    int j{};
-    std::for_each(neg_indices.begin(), neg_indices.end(),
-                  [&weights, &j, &pos_weights](auto i) mutable {
-                      weights[i] = pos_weights[j++];
-                  });
+    resample_all(distances_and_weights, neg_weights, neg_indices);
 
     if (!std::filesystem::exists("./results"))
         std::filesystem::create_directory("./results");
@@ -218,5 +168,5 @@ int main()
     f << "weight\n";
 
     std::for_each(weights.begin(), weights.end(),
-                  [&f](auto i) { f << i << "\n"; });
+                  [&f](auto i) mutable { f << i << "\n"; });
 }

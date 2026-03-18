@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <armadillo>
 #include <cassert>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -10,11 +9,9 @@
 #include <functional>
 #include <iostream>
 #include <memory>
-#include <numeric>
 #include <ostream>
 #include <ranges>
 #include <string>
-#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -22,7 +19,7 @@
 using DistanceAndWeight = std::pair<double, std::reference_wrapper<double>>;
 
 std::tuple<std::unique_ptr<arma::dmat>, std::unique_ptr<arma::dmat>,
-           std::vector<double>, std::vector<double>, std::vector<int>>
+           std::vector<double>, std::vector<double>>
 prepare()
 {
     rapidcsv::Document f{"./datasets/combined.csv"};
@@ -31,14 +28,12 @@ prepare()
     auto y = f.GetColumn<double>("y");
     auto w = f.GetColumn<double>("weight");
     std::vector<double> negative_w{};
-    std::vector<int> negative_indices{};
 
     for (auto [index, weight] : std::ranges::views::enumerate(w))
     {
         if (weight < 0)
         {
             negative_w.push_back(weight);
-            negative_indices.push_back(index);
         }
     }
 
@@ -64,8 +59,7 @@ prepare()
         i += 1;
     }
 
-    return {std::move(pt_y), std::move(negative_pt_y), w, negative_w,
-            negative_indices};
+    return {std::move(pt_y), std::move(negative_pt_y), w, negative_w};
 }
 
 std::vector<std::vector<DistanceAndWeight>> compute_distance(
@@ -103,7 +97,7 @@ std::vector<std::vector<DistanceAndWeight>> compute_distance(
     return dnw;
 }
 
-void resample(int index, double weight,
+void resample(double weight,
               std::vector<DistanceAndWeight>& distances_and_weights)
 {
     std::vector<double> added_weights{};
@@ -138,13 +132,11 @@ void resample(int index, double weight,
 
 void resample_all(
     std::vector<std::vector<DistanceAndWeight>>& distances_and_weights,
-    const std::vector<double>& negative_weights,
-    const std::vector<int>& indices)
+    const std::vector<double>& negative_weights)
 {
     for (int i = 0; i < negative_weights.size(); i++)
     {
-        resample(indices.at(i), negative_weights.at(i),
-                 distances_and_weights.at(i));
+        resample(negative_weights.at(i), distances_and_weights.at(i));
     }
 }
 
@@ -155,11 +147,10 @@ int main()
     auto negative_pt_y{std::move(std::get<1>(tuple))};
     auto weights{std::get<2>(tuple)};
     auto neg_weights{std::get<3>(tuple)};
-    auto neg_indices{std::get<4>(tuple)};
 
     auto distances_and_weights = compute_distance(pt_y, negative_pt_y, weights);
 
-    resample_all(distances_and_weights, neg_weights, neg_indices);
+    resample_all(distances_and_weights, neg_weights);
 
     if (!std::filesystem::exists("./results"))
         std::filesystem::create_directory("./results");

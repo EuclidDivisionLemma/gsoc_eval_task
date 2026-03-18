@@ -7,3 +7,7 @@ The `DistanceAndWeight` struct groups together, the distance and the weight. So 
 The scale is a column vector `[0, 10]`. When calculating norm, since each of the coordinates in the displacement vectors get squared, `10` also gets squared giving us `100`, the required scale. `%=` in `armadillo` is used for inplace element-wise multiplication.
 
 The algorithmic complexity should probably be `O(neg)` where `neg` is the number of negative events, because of using only single non-nested `for` loops.
+
+# Discussion Question
+
+I suppose it's because we need both `pt` and `y` to contribute to the distance metric equally.
